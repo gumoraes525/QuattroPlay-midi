@@ -87,6 +87,7 @@ typedef enum {
     Q_PAN_ENV_RIGHT,
 
     Q_PAN_POSENV,
+    Q_PAN_POSENV_RUN,
 
 } Q_PanState;
 

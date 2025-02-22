@@ -22,17 +22,17 @@ CXX = g++
 AR = ar
 LD = g++
 
-CFLAGS   :=
+CFLAGS   := -fcommon
 LIB      :=
 LIBDIR   :=
 INC      := 
 LDFLAGS  :=
 
 ifdef DEBUG
-CFLAGS   := -g -DDEBUG
+CFLAGS   += -g -DDEBUG
 else
-CFLAGS   := -O3 -g0 -DRELEASE
-LDFLAGS  := -s
+CFLAGS   += -O3 -g0 -DRELEASE
+LDFLAGS  += -s
 ifdef WINDOWS
 # disable console window
 LDFLAGS  += -mwindows

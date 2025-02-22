@@ -137,14 +137,6 @@ void Q_VoicePanSet(Q_State *Q,int VoiceNo,Q_Voice* V)
         break;
     case Q_PANMODE_POSENV:
     case Q_PANMODE_POSENV_SET:
-        pos = Q->McuDataPosBase;
-        pos += Q_ReadWord(Q, Q->TableOffset[Q_TOFFSET_PANTABLE]+(((V->Pan-1)&0xff)*2));
-        //Q_DEBUG("V=%02x position envelope (id %02x at %06x)\n",VoiceNo,V->Pan,pos);
-        pos++;
-        // Position envelopes aren't supported yet, just read the initial value for now.
-        Q_VoicePosConvert(Q,Q_ReadByte(Q,pos+1),Q_ReadByte(Q,pos),&V->VolumeFront,&V->VolumeRear);
-        V->PanState = Q_PAN_SET;
-        break;
     case Q_PANMODE_ENV:
     case Q_PANMODE_ENV_SET:
         pos = Q->McuDataPosBase;
@@ -191,7 +183,9 @@ void Q_VoicePanSet(Q_State *Q,int VoiceNo,Q_Voice* V)
         }
         else
         {
-            V->PanEnvValue2 = Q_ReadByte(Q,pos++)<<8;
+            V->PanEnvValue = V->PanEnvTarget;
+            V->PanEnvTarget |= Q_ReadByte(Q, pos++);
+            V->PanEnvValueY = V->PanEnvTarget<<8;
             V->PanState = Q_PAN_POSENV;
         }
         V->PanEnvPos = pos;
@@ -241,6 +235,13 @@ void Q_VoicePanSetVolume(Q_State* Q,int VoiceNo,Q_Voice* V,int8_t pan)
     Q_VoiceSetVolume(Q,VoiceNo,V,V->VolumeFront,V->VolumeRear);
 }
 
+// Write volume (for pos envelopes)
+void Q_VoicePosSetVolume(Q_State* Q,int VoiceNo,Q_Voice* V,int8_t posx,int8_t posy)
+{
+    Q_VoicePosConvert(Q,posx,posy,&V->VolumeFront,&V->VolumeRear);
+    Q_VoiceSetVolume(Q,VoiceNo,V,V->VolumeFront,V->VolumeRear);
+}
+
 // call 0x1c - update voice panning & volume
 // source: 0x71f6
 // vectors: see below
@@ -270,6 +271,8 @@ void Q_VoicePanUpdate(Q_State *Q,int VoiceNo,Q_Voice* V)
         Q_VoicePanEnvUpdate(Q,VoiceNo,V);
         break;
     case Q_PAN_POSENV: // 0x73ca, 0x75b0
+    case Q_PAN_POSENV_RUN:
+        Q_VoicePosEnvUpdate(Q,VoiceNo,V);
         break;
     }
 }
@@ -316,7 +319,6 @@ void Q_VoicePanEnvUpdate(Q_State* Q,int VoiceNo,Q_Voice* V)
 void Q_VoicePanEnvRead(Q_State* Q,int VoiceNo,Q_Voice* V)
 {
     V->PanEnvValue= 0x8000|(V->PanEnvValue&0xff);
-
     uint8_t d,e;
 
     while(1)
@@ -385,6 +387,85 @@ void Q_VoicePanEnvRead(Q_State* Q,int VoiceNo,Q_Voice* V)
                     V->PanEnvValue = V->PanEnvTarget;
 #endif
             }
+            return;
+        }
+    }
+}
+
+static int16_t PosEnvSlide(int16_t initial, int16_t target, uint16_t delta)
+{
+    int32_t value = initial;
+    if (value < target)
+    {
+        value += delta;
+        if (value >= target)
+            value = target;
+    }
+    else if (value > target)
+    {
+        value -= delta;
+        if (value <= target)
+            value = target;
+    }
+    return value;
+}
+
+void Q_VoicePosEnvUpdate(Q_State* Q,int VoiceNo,Q_Voice* V)
+{
+    if(V->PanEnvDelay)
+    {
+        V->PanEnvDelay--;
+    }
+    else
+    {
+        uint16_t p;
+        switch(V->PanState)
+        {
+        case Q_PAN_POSENV:
+            Q_VoicePosEnvRead(Q,VoiceNo,V);
+            break;
+        case Q_PAN_POSENV_RUN:
+            V->PanEnvValue = PosEnvSlide(V->PanEnvValue, V->PanEnvTarget & 0xff00, V->PanEnvDelta);
+            V->PanEnvValueY = PosEnvSlide(V->PanEnvValueY, V->PanEnvTarget << 8, V->PanEnvDelta);
+            p = (V->PanEnvValue & 0xff00) | (V->PanEnvValueY >> 8);
+            if (p == V->PanEnvTarget)
+                Q_VoicePosEnvRead(Q,VoiceNo,V);
+            break;
+        default:
+            break;
+        }
+        // we got end of envelope
+        if(V->PanState == Q_PAN_SET)
+            return;
+    }
+    return Q_VoicePosSetVolume(Q,VoiceNo,V,V->PanEnvValue>>8,V->PanEnvValueY>>8);
+}
+
+void Q_VoicePosEnvRead(Q_State* Q,int VoiceNo,Q_Voice* V)
+{
+    uint8_t d;
+
+    while(1)
+    {
+        d = Q_ReadByte(Q,V->PanEnvPos++);
+
+        switch(d)
+        {
+        case 0x80: // end envelope
+            V->PanState=Q_PAN_SET;
+            return;
+        case 0x81: // continue to next envelope and set new loop position
+            V->PanEnvPos+=3;
+            V->PanEnvLoop=V->PanEnvPos;
+            break;
+        case 0x82: // jump to loop position
+            V->PanEnvPos=V->PanEnvLoop;
+            break;
+        default:
+            V->PanEnvTarget = Q_ReadByte(Q,V->PanEnvPos++) << 8;
+            V->PanEnvTarget |= Q_ReadByte(Q,V->PanEnvPos++);
+            V->PanEnvDelta = Q_EnvelopeRateTable[d];
+            V->PanState = Q_PAN_POSENV_RUN;
             return;
         }
     }

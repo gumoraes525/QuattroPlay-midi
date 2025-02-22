@@ -41,11 +41,15 @@ void Q_VoicePanSet(Q_State *Q,int VoiceNo,Q_Voice* V);
 
 // Set panning and write volume to chip
 void Q_VoicePanSetVolume(Q_State *Q,int VoiceNo,Q_Voice *V,int8_t pan);
+void Q_VoicePosSetVolume(Q_State *Q,int VoiceNo,Q_Voice *V,int8_t posx,int8_t posy);
 // Write volume to chip
 void Q_VoiceSetVolume(Q_State *Q,int VoiceNo,Q_Voice *V, uint16_t VolumeF, uint16_t VolumeR);
 // update pan envelope
 void Q_VoicePanEnvUpdate(Q_State *Q,int VoiceNo,Q_Voice *V);
 void Q_VoicePanEnvRead(Q_State *Q,int VoiceNo,Q_Voice *V);
+
+void Q_VoicePosEnvUpdate(Q_State *Q,int VoiceNo,Q_Voice *V);
+void Q_VoicePosEnvRead(Q_State *Q,int VoiceNo,Q_Voice *V);
 
 // call 0x1c - pan update
 void Q_VoicePanUpdate(Q_State *Q,int VoiceNo,Q_Voice *V);

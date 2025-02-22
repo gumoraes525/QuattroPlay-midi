@@ -131,7 +131,7 @@ This might not be complete yet.
 *   The C30 chip is not emulated, instead the C352 is used. This makes VGM logging possible.
 *   The C140 chip is not emulated, instead the C352 is used. The compressed sample format differs, breaking VGM logs in a few games.
 *   The C219 chip is not emulated, instead the C352 is used. This actually improves the sound quality of VGM logs, as the C219 chip is not accurately emulated in VGM players.
-*	Position envelopes (used by a few songs in _Cyber Commando_) are not supported.
+*	Position envelopes (used by a few songs in _Cyber Commando_) are implemented from scratch, and may not be accurate the real driver.
 
 ## Copyright
 

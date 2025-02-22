@@ -159,7 +159,7 @@ struct Q_Voice {
 
     uint16_t PanEnvTarget;
     uint16_t PanEnvValue;
-    uint16_t PanEnvValue2;
+    uint16_t PanEnvValueY;
     uint16_t PanEnvDelta;
     uint8_t PanEnvDelay;
 
