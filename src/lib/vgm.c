@@ -53,6 +53,7 @@ uint8_t* track_len_ptr = NULL;     // pointer to 4-byte track length field to pa
 uint8_t* track_start_ptr = NULL;   // start of track data (first byte after length)
 
 // Internal helpers
+static int eot_written = 0; /* track whether End-of-Track was already emitted */
 
 // Write a single byte into data buffer
 static inline void write_u8(uint8_t v)
@@ -322,10 +323,10 @@ void vgm_write_tag(char* gamename, int songid)
     write_bytes((const uint8_t*)buf, len);
 }
 
-// Finish the MIDI file: write End of Track and patch the track length, then save to disk.
-void vgm_close()
+/* vgm_stop: emit End-of-Track (but do not close file). */
+void vgm_stop()
 {
-    // Flush any remaining delay
+    /* flush accumulated delay into delta-time */
     if (delayq >= 10) {
         uint32_t ticks = flush_delay_get_ticks();
         write_varlen(ticks);
@@ -333,26 +334,47 @@ void vgm_close()
         write_varlen(0);
     }
 
-    // Write End of Track meta event
-    write_u8(0xFF);
-    write_u8(0x2F);
-    write_u8(0x00);
+    if (!eot_written) {
+        write_u8(0xFF);
+        write_u8(0x2F);
+        write_u8(0x00);
+        eot_written = 1;
+    }
+}
 
-    // Patch track length: length = current_data_end - track_start_ptr
+// Finish the MIDI file: write End of Track and patch the track length, then save to disk.
+void vgm_close()
+{
+    /* Flush any remaining delay */
+    if (delayq >= 10) {
+        uint32_t ticks = flush_delay_get_ticks();
+        write_varlen(ticks);
+    } else {
+        write_varlen(0);
+    }
+
+    /* Only write End-of-Track if vgm_stop() hasn't already done it */
+    if (!eot_written) {
+        write_u8(0xFF);
+        write_u8(0x2F);
+        write_u8(0x00);
+        eot_written = 1;
+    }
+
+    /* Patch track length: length = current_data_end - track_start_ptr */
     if (track_len_ptr && track_start_ptr) {
         uint32_t track_length = (uint32_t)(data - track_start_ptr);
-        // Write big-endian length into the placeholder
         track_len_ptr[0] = (track_length >> 24) & 0xFF;
         track_len_ptr[1] = (track_length >> 16) & 0xFF;
         track_len_ptr[2] = (track_length >> 8) & 0xFF;
         track_len_ptr[3] = (track_length >> 0) & 0xFF;
     }
 
-    // Write buffer to file
+    /* Write buffer to file */
     size_t total_size = (size_t)(data - vgmdata);
     write_file(filename, vgmdata, total_size);
 
-    // Free buffer and filename
+    /* Free buffer and filename */
     free(vgmdata);
     free(filename);
     vgmdata = NULL;
