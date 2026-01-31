@@ -1,4 +1,3 @@
- url=https://github.com/gumoraes525/QuattroPlay-midi/blob/ca26a8d6d1f27683442532376fee8a7c674724f1/src/lib/vgm.c
 /*
     MIDI writing (replaces previous VGM writer)
 
