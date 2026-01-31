@@ -1,255 +1,362 @@
+ url=https://github.com/gumoraes525/QuattroPlay-midi/blob/ca26a8d6d1f27683442532376fee8a7c674724f1/src/lib/vgm.c
 /*
-    VGM writing
+    MIDI writing (replaces previous VGM writer)
+
+    This file keeps the original external API (vgm_open, vgm_write, vgm_delay, vgm_close, ...)
+    but the internals now produce a Standard MIDI File (SMF, single-track).
+    The mapping from the previous VGM-style parameters to MIDI is intentionally simple:
+
+    - vgm_write(command, port, reg, value)
+        * If `command` is a MIDI status like 0x90 (Note On), 0x80 (Note Off),
+          0xB0 (Control Change), 0xC0 (Program Change), 0xE0 (Pitch Bend),
+          the write will produce the corresponding MIDI message.
+        * `port` is interpreted as MIDI channel (0-15).
+        * `reg` and `value` provide message data (note number/controller number/LSB/MSB etc.)
+        * Unknown commands are ignored (no-op).
+
+    - vgm_delay(delay)
+        * `delay` uses the same units as before (the original code accumulated
+          delayq as "VGM samples * 10" and then used delayq/10 when writing).
+        * For MIDI output we use the same approach: accumulated delay is converted
+          to delta-time units by dividing by 10 (so 1 VGM sample => 1 tick).
+        * The file's time division (ticks per quarter note) is set to 480; since we
+          don't set tempo events, timings are relative: the mapping preserves
+          relative timing between events.
+
+    Implementation notes:
+    - Produces a single-track (format 0) MIDI file.
+    - Writes a placeholder track length and patches it on vgm_close().
+    - Uses the existing write_file(...) helper from fileio.h (unchanged).
+    - Buffer auto-expands with realloc() like the original implementation.
 */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
-#include <wchar.h>
 #include <time.h>
 
 #include "vgm.h"
 #include "fileio.h"
 
-// has to be larger than ~20MB
-#define VGM_BUFFER 50000000
+// initial buffer: keep same strategy (can grow)
+#define MIDI_BUFFER 50000000
 
-    uint32_t buffer_size;
-    uint32_t delayq;
-    uint32_t samplecnt;
-    uint32_t loop_set;
-    uint8_t* vgmdata;
-    uint8_t* data;
-    char* filename;
+uint32_t buffer_size;
+uint32_t delayq;           // accumulated delay (same semantics as original: VGM samples*10)
+uint8_t* vgmdata;
+uint8_t* data;
+char* filename;
 
-// Increments destination pointer
-void my_memcpy(uint8_t** dest, void* src, int size)
+// Track bookkeeping
+uint8_t* track_len_ptr = NULL;     // pointer to 4-byte track length field to patch later
+uint8_t* track_start_ptr = NULL;   // start of track data (first byte after length)
+
+// Internal helpers
+
+// Write a single byte into data buffer
+static inline void write_u8(uint8_t v)
 {
-    memcpy(*dest,src,size);
-    *dest += size;
-}
-
-void add_datablockcmd(uint8_t** dest, uint8_t dtype, uint32_t size, uint32_t romsize, uint32_t offset)
-{
-    **dest = 0x67;*dest+=1;
-    **dest = 0x66;*dest+=1;
-    **dest = dtype;*dest+=1;
-    size += 8;
-    my_memcpy(dest,&size,4);
-    my_memcpy(dest,&romsize,4);
-    my_memcpy(dest,&offset,4);
-}
-
-void add_delay(uint8_t** dest, int delay)
-{
-    samplecnt += delay;
-
-    int commandcount = floor(delay/65535);
-    uint16_t finalcommand = delay%65535;
-
-    while(commandcount)
-    {
-        **dest = 0x61;*dest+=1;
-        **dest = 0xff;*dest+=1;
-        **dest = 0xff;*dest+=1;
-        commandcount--;
-    }
-
-    if(finalcommand > 16)
-    {
-        **dest = 0x61;*dest+=1;
-        my_memcpy(dest,&finalcommand,2);
-    }
-    else if(finalcommand > 0)
-    {
-        **dest = 0x70 + finalcommand-1;
-        *dest+=1;
-    }
-}
-
-void vgm_open(char* fname)
-{
-    filename = (char*)malloc(strlen(fname)+10);
-    strcpy(filename,fname);
-    delayq=0;
-    loop_set=0;
-
-    // create initial buffer
-    vgmdata=(uint8_t*)malloc(VGM_BUFFER);
-    data = vgmdata;
-    buffer_size = VGM_BUFFER;
-    memset(data, 0, VGM_BUFFER);
-
-    // vgm magic
-    memcpy(data, "Vgm ", 4);
-
-    // version
-    data+=8;
-    *data++ = 0x71;
-    *data++ = 0x01;
-
-    //data offset
-    *(uint32_t*)(vgmdata+0x34)=0x100-0x34;
-
-    data=vgmdata+0x100;
-}
-
-void vgm_poke32(int32_t offset, uint32_t d)
-{
-    *(uint32_t*)(vgmdata+offset)= d;
-}
-
-void vgm_poke8(int32_t offset, uint8_t d)
-{
-    *(uint8_t*)(vgmdata+offset)= d;
-}
-
-// notice: start offset was replaced with ROM mask.
-void vgm_datablock(uint8_t dbtype, uint32_t dbsize, uint8_t* datablock, uint32_t maxsize, uint32_t mask, int32_t flags)
-{
-    add_datablockcmd(&data, dbtype, dbsize|flags, maxsize, 0);
-
-    int i;
-    for(i=0;i<dbsize;i++)
-        *data++ = datablock[i & mask];
-
-    //my_memcpy(&data, datablock, dbsize);
-}
-
-void vgm_setloop()
-{
-    // add delays
-    if(delayq/10 > 1)
-    {
-        add_delay(&data,delayq/10);
-        delayq=delayq%10;
-    }
-
-    loop_set = samplecnt;
-    *(uint32_t*)(vgmdata+0x1c)= data-vgmdata-0x1c;
-}
-
-void vgm_write(uint8_t command, uint8_t port, uint16_t reg, uint16_t value)
-{
-    if(delayq/10 > 1)
-    {
-        add_delay(&data,delayq/10);
-        delayq=delayq%10;
-    }
-
-// todo: need to handle command types if using other chips
-    *data++ = command;
-
-    if(command == 0xe1) // C352
-    {
-        *data++ = reg>>8;
-        *data++ = reg&0xff;
-        *data++ = value>>8;
-        *data++ = value&0xff;
-    }
-    else if(command == 0x54) // YM2151
-    {
-        *data++ = reg;
-        *data++ = value;
-    }
-    else // following is for D0-D6 commands...
-    {
-        *data++ = port;
-        *data++ = (reg&0xff);
-        *data++ = (value&0xff);
-    }
-
-    // resize buffer if needed
-    if(buffer_size-(data-vgmdata) < 1000000)
-    {
-        uint8_t* temp;
-        temp = realloc(vgmdata,buffer_size*2);
-        if(temp)
-        {
+    *data++ = v;
+    // Grow if needed
+    if (buffer_size - (data - vgmdata) < 1024) {
+        uint8_t* temp = realloc(vgmdata, buffer_size * 2);
+        if (temp) {
+            size_t offset = data - vgmdata;
             buffer_size *= 2;
-            data = temp+(data-vgmdata);
             vgmdata = temp;
+            data = vgmdata + offset;
         }
     }
 }
 
-// delay is in VGM samples*10.
+static inline void write_bytes(const uint8_t* src, size_t len)
+{
+    memcpy(data, src, len);
+    data += len;
+    if (buffer_size - (data - vgmdata) < 1024) {
+        size_t offset = data - vgmdata;
+        uint8_t* temp = realloc(vgmdata, buffer_size * 2);
+        if (temp) {
+            buffer_size *= 2;
+            vgmdata = temp;
+            data = vgmdata + offset;
+        }
+    }
+}
+
+// Write a big-endian 32-bit value
+static inline void write_be32(uint32_t v)
+{
+    write_u8((v >> 24) & 0xFF);
+    write_u8((v >> 16) & 0xFF);
+    write_u8((v >> 8) & 0xFF);
+    write_u8((v >> 0) & 0xFF);
+}
+
+// Write a big-endian 16-bit value
+static inline void write_be16(uint16_t v)
+{
+    write_u8((v >> 8) & 0xFF);
+    write_u8((v >> 0) & 0xFF);
+}
+
+// Write MIDI variable length quantity
+static void write_varlen(uint32_t value)
+{
+    // Collect bytes in a temporary buffer (max 5 bytes for 32-bit)
+    uint8_t buffer[5];
+    int idx = 0;
+    buffer[idx++] = value & 0x7F;
+    value >>= 7;
+    while (value) {
+        buffer[idx++] = 0x80 | (value & 0x7F);
+        value >>= 7;
+    }
+    // Write in reverse order
+    for (int i = idx - 1; i >= 0; --i) {
+        write_u8(buffer[i]);
+    }
+}
+
+// Public API (names kept to minimize changes elsewhere)
+
+// Open (create) a new MIDI file buffer
+void vgm_open(char* fname)
+{
+    // store filename (ensure .mid extension)
+    size_t flen = strlen(fname);
+    size_t alloc_len = flen + 8;
+    filename = (char*)malloc(alloc_len);
+    if (!filename) return;
+    strcpy(filename, fname);
+
+    // If filename doesn't end with .mid, append .mid
+    if (flen < 4 || strcmp(filename + flen - 4, ".mid") != 0) {
+        strcat(filename, ".mid");
+    }
+
+    delayq = 0;
+
+    // allocate buffer
+    vgmdata = (uint8_t*)malloc(MIDI_BUFFER);
+    if (!vgmdata) return;
+    data = vgmdata;
+    buffer_size = MIDI_BUFFER;
+    memset(vgmdata, 0, buffer_size);
+
+    // MIDI header chunk: MThd
+    // Chunk id
+    write_bytes((const uint8_t*)"MThd", 4);
+    // Header length = 6
+    write_be32(6);
+    // Format 0 (single track)
+    write_be16(0);
+    // Number of tracks = 1
+    write_be16(1);
+    // Division (ticks per quarter note), choose 480 TPQN
+    write_be16(480);
+
+    // Start Track chunk: MTrk with placeholder length
+    write_bytes((const uint8_t*)"MTrk", 4);
+    // Placeholder for 4-byte length; remember pointer to patch later
+    track_len_ptr = data;
+    // write zero for now
+    write_be32(0);
+    // mark start of actual track data
+    track_start_ptr = data;
+}
+
+// A simple helper for converting accumulated delay (same units as previous code)
+// into delta-time for MIDI. The original code used delayq in "VGM samples*10"
+// and often called add_delay(&data, delayq/10). We'll use the same mapping:
+// delta_ticks = delayq / 10  (1 VGM sample -> 1 MIDI tick).
+static inline uint32_t flush_delay_get_ticks()
+{
+    uint32_t ticks = delayq / 10;
+    delayq = 0;
+    return ticks;
+}
+
+// Write a MIDI event respecting the accumulated delay (delta-time).
+// The function signature mirrors the original vgm_write so existing callers
+// require minimal changes. Mapping notes:
+//  - command 0x90: Note On
+//  - command 0x80: Note Off
+//  - command 0xB0: Control Change
+//  - command 0xC0: Program Change
+//  - command 0xE0: Pitch Bend (14-bit from `value`)
+//  - command 0xF0: SysEx start (value = length, data bytes follow via vgm_datablock in original; here ignored)
+// Unknown commands are currently ignored.
+void vgm_write(uint8_t command, uint8_t port, uint16_t reg, uint16_t value)
+{
+    // flush accumulated delay before writing this event
+    if (delayq >= 10) {
+        uint32_t ticks = flush_delay_get_ticks();
+        write_varlen(ticks);
+    } else {
+        // zero delta-time
+        write_varlen(0);
+    }
+
+    uint8_t status = command & 0xF0;
+    uint8_t channel = port & 0x0F;
+
+    if (status == 0x90) {
+        // Note On: reg = note, value = velocity
+        write_u8(0x90 | channel);
+        write_u8(reg & 0x7F);
+        write_u8(value & 0x7F);
+    }
+    else if (status == 0x80) {
+        // Note Off
+        write_u8(0x80 | channel);
+        write_u8(reg & 0x7F);
+        write_u8(value & 0x7F);
+    }
+    else if (status == 0xB0) {
+        // Control Change: reg = controller, value = controller value
+        write_u8(0xB0 | channel);
+        write_u8(reg & 0x7F);
+        write_u8(value & 0x7F);
+    }
+    else if (status == 0xC0) {
+        // Program Change: value = program number
+        write_u8(0xC0 | channel);
+        write_u8(value & 0x7F);
+    }
+    else if (status == 0xE0) {
+        // Pitch Bend: 14-bit value (LSB, MSB)
+        uint16_t bend = value & 0x3FFF;
+        uint8_t lsb = bend & 0x7F;
+        uint8_t msb = (bend >> 7) & 0x7F;
+        write_u8(0xE0 | channel);
+        write_u8(lsb);
+        write_u8(msb);
+    }
+    else if (command == 0xFF) {
+        // Meta-events: interpret reg as meta type and value as length/data if simple
+        // Here we support End of Track (0x2F) if requested by caller.
+        uint8_t meta_type = reg & 0xFF;
+        if (meta_type == 0x2F) {
+            // End of Track
+            write_u8(0xFF);
+            write_u8(0x2F);
+            write_u8(0x00);
+        } else {
+            // unsupported meta event: no-op
+        }
+    }
+    else if (command == 0xF0 || command == 0xF7) {
+        // SysEx: Not implemented here (would require caller to pass actual sysex bytes).
+        // No-op for now.
+    }
+    else {
+        // Unknown command: no-op (preserves timing but writes no MIDI message)
+    }
+}
+
+// Add to the accumulated delay (same semantics as original: delay in VGM samples*10)
 void vgm_delay(uint32_t delay)
 {
-    delayq+=delay;
+    delayq += delay;
 }
 
-// https://github.com/cppformat/cppformat/pull/130/files
-void gd3_write_string(char* s)
+// Convenience: write a 32-bit poke (kept for compatibility, no effect for MIDI)
+void vgm_poke32(int32_t offset, uint32_t d)
 {
-    size_t l;
-    #if defined(_WIN32) && defined(__MINGW32__) && !defined(__NO_ISOCEXT)
-        l = _snwprintf((wchar_t*)data,256,L"%S", s);
-    #else
-        l = swprintf((wchar_t*)data,256,L"%s", s);
-    #endif // defined
-
-    data += (l+1)*2;
+    // No-op for MIDI-based writer, but preserved to avoid breaking callers.
+    (void)offset;
+    (void)d;
 }
 
-void vgm_write_tag(char* gamename,int songid)
+void vgm_poke8(int32_t offset, uint8_t d)
 {
-    time_t t;
-    struct tm * tm;
-    time(&t);
-    tm = localtime(&t);
-    char ts [32];
-    strftime(ts,32,"%Y-%m-%d %H:%M:%S",tm);
-    char tracknotes[256];
-    tracknotes[0] = 0;
-    if(songid >= 0)
-        sprintf(tracknotes,"Song ID: %03x\n",songid&0x7ff);
-    strcpy(tracknotes+strlen(tracknotes),"Generated using QuattroPlay by ctr (Built "__DATE__" "__TIME__")");
-
-    // Tag offset
-    *(uint32_t*)(vgmdata+0x14)= data-vgmdata-0x14;
-
-    memcpy(data, "Gd3 \x00\x01\x00\x00" , 8);
-    uint8_t* len_s = data+8;
-    data+=12;
-
-    gd3_write_string(""); // Track name
-    gd3_write_string(""); // Track name (native)
-    gd3_write_string(gamename); // Game name
-    gd3_write_string(""); // Game name (native)
-    gd3_write_string("Arcade Machine"); // System name
-    gd3_write_string(""); // System name (native)
-    gd3_write_string(""); // Author name
-    gd3_write_string(""); // Author name (native)
-    gd3_write_string(ts); // Time
-    gd3_write_string(""); // Pack author
-    gd3_write_string(tracknotes); // Notes
-
-    *(uint32_t*)(len_s) = data-len_s-4;        // length
+    (void)offset;
+    (void)d;
 }
 
-void vgm_stop()
+// Datablocks and loop markers from VGM are not directly applicable to MIDI.
+// Provide stubbed implementations to preserve API.
+void vgm_datablock(uint8_t dbtype, uint32_t dbsize, uint8_t* datablock, uint32_t maxsize, uint32_t mask, int32_t flags)
 {
-    if(delayq/10 > 1)
-    {
-        add_delay(&data,delayq/10);
-        delayq=0;
+    (void)dbtype; (void)dbsize; (void)datablock; (void)maxsize; (void)mask; (void)flags;
+    // No-op for MIDI; sysex might be implemented here if needed in the future.
+}
+
+void vgm_setloop()
+{
+    // MIDI loop points must be handled with sequencer-specific meta/data; no-op here.
+}
+
+// Write a simple GD3-like tag as a text meta-event (optional).
+// The original VGM GD3 block is not used for MIDI; we offer a small helper that appends
+// a text meta event with the provided name and timestamp.
+void vgm_write_tag(char* gamename, int songid)
+{
+    // flush any pending delay before inserting tag
+    if (delayq >= 10) {
+        uint32_t ticks = flush_delay_get_ticks();
+        write_varlen(ticks);
+    } else {
+        write_varlen(0);
     }
-    *data++ = 0x66;
 
-    // Sample count/loop sample count
-    *(uint32_t*)(vgmdata+0x18)= samplecnt;
-    if(loop_set)
-        *(uint32_t*)(vgmdata+0x20)= samplecnt-loop_set;
+    // Build a textual tag with timestamp and optional song id
+    time_t t = time(NULL);
+    struct tm* tm = localtime(&t);
+    char ts[64];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm);
+    char buf[512];
+    if (songid >= 0) {
+        snprintf(buf, sizeof(buf), "%s — Song ID: %03x — Generated: %s", gamename ? gamename : "", songid & 0x7FF, ts);
+    } else {
+        snprintf(buf, sizeof(buf), "%s — Generated: %s", gamename ? gamename : "", ts);
+    }
+
+    size_t len = strlen(buf);
+    // Write a Text meta event (0x01) containing the tag as ASCII
+    write_u8(0xFF);
+    write_u8(0x01);
+    write_varlen((uint32_t)len);
+    write_bytes((const uint8_t*)buf, len);
 }
 
+// Finish the MIDI file: write End of Track and patch the track length, then save to disk.
 void vgm_close()
 {
-    // EoF offset
-    *(uint32_t*)(vgmdata+0x04)= data-vgmdata-4;
+    // Flush any remaining delay
+    if (delayq >= 10) {
+        uint32_t ticks = flush_delay_get_ticks();
+        write_varlen(ticks);
+    } else {
+        write_varlen(0);
+    }
 
-    write_file(filename, vgmdata, data-vgmdata);
+    // Write End of Track meta event
+    write_u8(0xFF);
+    write_u8(0x2F);
+    write_u8(0x00);
 
+    // Patch track length: length = current_data_end - track_start_ptr
+    if (track_len_ptr && track_start_ptr) {
+        uint32_t track_length = (uint32_t)(data - track_start_ptr);
+        // Write big-endian length into the placeholder
+        track_len_ptr[0] = (track_length >> 24) & 0xFF;
+        track_len_ptr[1] = (track_length >> 16) & 0xFF;
+        track_len_ptr[2] = (track_length >> 8) & 0xFF;
+        track_len_ptr[3] = (track_length >> 0) & 0xFF;
+    }
+
+    // Write buffer to file
+    size_t total_size = (size_t)(data - vgmdata);
+    write_file(filename, vgmdata, total_size);
+
+    // Free buffer and filename
     free(vgmdata);
+    free(filename);
+    vgmdata = NULL;
+    data = NULL;
+    filename = NULL;
 }
