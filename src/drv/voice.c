@@ -5,6 +5,7 @@
 #include "voice.h"
 #include "helper.h"
 #include "tables.h"
+#include "../lib/vgm.h"
 
 // Call 0x08 - Allocate a voice to a channel and disables previous channel on voice.
 // source: 0x4dd6 (call 0x14 at 0x4e78 has a similar function)
@@ -93,6 +94,7 @@ void Q_VoiceProcessEvent(Q_State *Q,int VoiceNo,Q_Voice *V,Q_VoiceEvent *E)
             // no envelope - cutoff
             V->Enabled = 0;
             Q_C352_W(Q,VoiceNo,C352_FLAGS,0);
+            vgm_note_off(VoiceNo);
         }
         return;
     }
@@ -177,6 +179,7 @@ void Q_VoiceKeyOn(Q_State *Q,int VoiceNo,Q_Voice* V)
 
     Q_C352_W(Q,VoiceNo,C352_WAVE_BANK,V->WaveBank);
     Q_C352_W(Q,VoiceNo,C352_FLAGS,    V->WaveFlags|C352_FLG_KEYON);
+    vgm_note_on(VoiceNo,V->BaseNote);
 
 }
 
@@ -240,6 +243,7 @@ void Q_VoiceUpdate(Q_State *Q,int VoiceNo,Q_Voice* V)
 void Q_VoiceDisable(Q_State *Q,int VoiceNo,Q_Voice* V)
 {
     Q_C352_W(Q,VoiceNo,C352_FLAGS,0);
+    vgm_note_off(VoiceNo);
     V->EnvState = Q_ENV_DISABLE;
     V->Enabled=0;
 }

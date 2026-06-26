@@ -22,6 +22,9 @@
     uint8_t* vgmdata;
     uint8_t* data;
     char* filename;
+    FILE* note_log;
+    int note_log_dirty;
+    char note_log_notes[32][4];
 
 // Increments destination pointer
 void my_memcpy(uint8_t** dest, void* src, int size)
@@ -41,8 +44,29 @@ void add_datablockcmd(uint8_t** dest, uint8_t dtype, uint32_t size, uint32_t rom
     my_memcpy(dest,&offset,4);
 }
 
+static void vgm_note_log_write_header(void)
+{
+    int i;
+    if(!note_log)
+        return;
+    for(i=0;i<32;i++)
+        fprintf(note_log,"Channel %-9d%s",i+1,(i == 31) ? "\n" : " ");
+}
+
+static void vgm_note_log_flush(void)
+{
+    int i;
+    if(!note_log || !note_log_dirty)
+        return;
+    for(i=0;i<32;i++)
+        fprintf(note_log,"%-17s%s",note_log_notes[i],(i == 31) ? "\n" : " ");
+    note_log_dirty = 0;
+}
+
 void add_delay(uint8_t** dest, int delay)
 {
+    if(delay > 0)
+        vgm_note_log_flush();
     samplecnt += delay;
 
     int commandcount = floor(delay/65535);
@@ -72,8 +96,27 @@ void vgm_open(char* fname)
 {
     filename = (char*)malloc(strlen(fname)+10);
     strcpy(filename,fname);
+    samplecnt=0;
     delayq=0;
     loop_set=0;
+    note_log = NULL;
+    note_log_dirty = 0;
+    memset(note_log_notes, 0, sizeof(note_log_notes));
+
+    {
+        char* txtname = (char*)malloc(strlen(fname)+10);
+        char* ext;
+        strcpy(txtname,fname);
+        ext = strrchr(txtname,'.');
+        if(ext != NULL)
+            strcpy(ext,".txt");
+        else
+            strcat(txtname,".txt");
+        note_log = fopen(txtname,"w");
+        if(note_log)
+            vgm_note_log_write_header();
+        free(txtname);
+    }
 
     // create initial buffer
     vgmdata=(uint8_t*)malloc(VGM_BUFFER);
@@ -180,6 +223,39 @@ void vgm_delay(uint32_t delay)
     delayq+=delay;
 }
 
+void vgm_note_on(int channel, uint8_t note)
+{
+    static const char* names[12] = {"A-","A#","B-","C-","C#","D-","D#","E-","F-","F#","G-","G#"};
+    int octave;
+    if(channel < 0 || channel >= 32)
+        return;
+    octave = (note-3)/12;
+    note %= 12;
+    snprintf(note_log_notes[channel],sizeof(note_log_notes[channel]),"%s%d",names[note],octave);
+    note_log_dirty = 1;
+}
+
+void vgm_note_from_c352(int channel, uint16_t freq)
+{
+    int note;
+    if(freq == 0)
+        return;
+    note = (int)floor((12.0 * log((double)freq / 0x88) / log(2.0)) + 0.5);
+    if(note < 0)
+        note = 0;
+    if(note > 127)
+        note = 127;
+    vgm_note_on(channel,(uint8_t)note);
+}
+
+void vgm_note_off(int channel)
+{
+    if(channel < 0 || channel >= 32)
+        return;
+    strcpy(note_log_notes[channel],"---");
+    note_log_dirty = 1;
+}
+
 // https://github.com/cppformat/cppformat/pull/130/files
 void gd3_write_string(char* s)
 {
@@ -246,10 +322,18 @@ void vgm_stop()
 
 void vgm_close()
 {
+    vgm_note_log_flush();
     // EoF offset
     *(uint32_t*)(vgmdata+0x04)= data-vgmdata-4;
 
     write_file(filename, vgmdata, data-vgmdata);
 
+    if(note_log)
+    {
+        fclose(note_log);
+        note_log = NULL;
+    }
+
     free(vgmdata);
+    free(filename);
 }
