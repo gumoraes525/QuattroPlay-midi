@@ -85,6 +85,14 @@ static void midi_write_varlen(uint32_t value)
     }
 }
 
+static uint8_t midi_note_from_log_note(uint8_t note)
+{
+    int midi_note_value = note + 9;
+    if(midi_note_value > 127)
+        midi_note_value = 127;
+    return midi_note_value;
+}
+
 static void midi_write_event(uint8_t status, uint8_t data1, uint8_t data2)
 {
     if(!miditrack)
@@ -129,6 +137,19 @@ static void midi_open(void)
     midi_write_byte(0x20);
 }
 
+static void midi_note_off_all(void)
+{
+    int i;
+    for(i=0;i<32;i++)
+    {
+        if(midi_note_active[i])
+        {
+            midi_write_event(0x80 | (i & 0x0f),midi_note[i],0);
+            midi_note_active[i] = 0;
+        }
+    }
+}
+
 static void midi_close(void)
 {
     char* midiname;
@@ -139,6 +160,7 @@ static void midi_close(void)
     if(!miditrack)
         return;
 
+    midi_note_off_all();
     midi_write_varlen(midi_delta);
     midi_write_byte(0xff);
     midi_write_byte(0x2f);
@@ -366,6 +388,7 @@ void vgm_note_on(int channel, uint8_t note)
     uint8_t midi_note_value;
     if(channel < 0 || channel >= 32)
         return;
+    midi_note_value = midi_note_from_log_note(note);
     midi_note_value = note;
     octave = (note-3)/12;
     note %= 12;
