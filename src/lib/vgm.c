@@ -25,6 +25,13 @@
     FILE* note_log;
     int note_log_dirty;
     char note_log_notes[32][4];
+    uint8_t* miditrack;
+    uint32_t midi_buffer_size;
+    uint32_t midi_track_size;
+    uint32_t midi_delta;
+    uint32_t midi_delta_rem;
+    uint8_t midi_note[32];
+    uint8_t midi_note_active[32];
 
 extern const char* Q_NoteNames[12];
 
@@ -44,6 +51,128 @@ void add_datablockcmd(uint8_t** dest, uint8_t dtype, uint32_t size, uint32_t rom
     my_memcpy(dest,&size,4);
     my_memcpy(dest,&romsize,4);
     my_memcpy(dest,&offset,4);
+}
+
+static void midi_write_byte(uint8_t value)
+{
+    if(midi_track_size >= midi_buffer_size)
+    {
+        uint8_t* temp;
+        temp = realloc(miditrack,midi_buffer_size*2);
+        if(!temp)
+            return;
+        miditrack = temp;
+        midi_buffer_size *= 2;
+    }
+    miditrack[midi_track_size++] = value;
+}
+
+static void midi_write_varlen(uint32_t value)
+{
+    uint32_t buffer = value & 0x7f;
+    while((value >>= 7))
+    {
+        buffer <<= 8;
+        buffer |= ((value & 0x7f) | 0x80);
+    }
+    while(1)
+    {
+        midi_write_byte(buffer & 0xff);
+        if(buffer & 0x80)
+            buffer >>= 8;
+        else
+            break;
+    }
+}
+
+static void midi_write_event(uint8_t status, uint8_t data1, uint8_t data2)
+{
+    if(!miditrack)
+        return;
+    midi_write_varlen(midi_delta);
+    midi_write_byte(status);
+    midi_write_byte(data1);
+    midi_write_byte(data2);
+    midi_delta = 0;
+}
+
+static void midi_add_delay(int samples)
+{
+    uint32_t ticks;
+    if(!miditrack || samples <= 0)
+        return;
+    midi_delta_rem += (uint32_t)samples * 960;
+    ticks = midi_delta_rem / 44100;
+    midi_delta_rem %= 44100;
+    midi_delta += ticks;
+}
+
+static void midi_open(void)
+{
+    midi_buffer_size = 0x10000;
+    midi_track_size = 0;
+    midi_delta = 0;
+    midi_delta_rem = 0;
+    memset(midi_note,0,sizeof(midi_note));
+    memset(midi_note_active,0,sizeof(midi_note_active));
+    miditrack = malloc(midi_buffer_size);
+    if(!miditrack)
+        return;
+
+    /* tempo: 120 bpm */
+    midi_write_varlen(0);
+    midi_write_byte(0xff);
+    midi_write_byte(0x51);
+    midi_write_byte(0x03);
+    midi_write_byte(0x07);
+    midi_write_byte(0xa1);
+    midi_write_byte(0x20);
+}
+
+static void midi_close(void)
+{
+    char* midiname;
+    char* ext;
+    FILE* midifile;
+    uint32_t len;
+
+    if(!miditrack)
+        return;
+
+    midi_write_varlen(midi_delta);
+    midi_write_byte(0xff);
+    midi_write_byte(0x2f);
+    midi_write_byte(0x00);
+    midi_delta = 0;
+
+    midiname = (char*)malloc(strlen(filename)+10);
+    strcpy(midiname,filename);
+    ext = strrchr(midiname,'.');
+    if(ext != NULL)
+        strcpy(ext,".mid");
+    else
+        strcat(midiname,".mid");
+
+    midifile = fopen(midiname,"wb");
+    if(midifile)
+    {
+        fwrite("MThd",1,4,midifile);
+        fputc(0x00,midifile); fputc(0x00,midifile); fputc(0x00,midifile); fputc(0x06,midifile);
+        fputc(0x00,midifile); fputc(0x00,midifile);
+        fputc(0x00,midifile); fputc(0x01,midifile);
+        fputc(0x01,midifile); fputc(0xe0,midifile);
+        fwrite("MTrk",1,4,midifile);
+        len = midi_track_size;
+        fputc((len>>24)&0xff,midifile);
+        fputc((len>>16)&0xff,midifile);
+        fputc((len>>8)&0xff,midifile);
+        fputc(len&0xff,midifile);
+        fwrite(miditrack,1,midi_track_size,midifile);
+        fclose(midifile);
+    }
+    free(midiname);
+    free(miditrack);
+    miditrack = NULL;
 }
 
 static void vgm_note_log_write_header(void)
@@ -68,6 +197,10 @@ static void vgm_note_log_flush(void)
 void add_delay(uint8_t** dest, int delay)
 {
     if(delay > 0)
+    {
+        vgm_note_log_flush();
+        midi_add_delay(delay);
+    }
         vgm_note_log_flush();
     samplecnt += delay;
 
@@ -104,6 +237,8 @@ void vgm_open(char* fname)
     note_log = NULL;
     note_log_dirty = 0;
     memset(note_log_notes, 0, sizeof(note_log_notes));
+    miditrack = NULL;
+    midi_open();
 
     {
         char* txtname = (char*)malloc(strlen(fname)+10);
@@ -227,6 +362,22 @@ void vgm_delay(uint32_t delay)
 
 void vgm_note_on(int channel, uint8_t note)
 {
+    int octave;
+    uint8_t midi_note_value;
+    if(channel < 0 || channel >= 32)
+        return;
+    midi_note_value = note;
+    octave = (note-3)/12;
+    note %= 12;
+    snprintf(note_log_notes[channel],sizeof(note_log_notes[channel]),"%s%d",Q_NoteNames[note],octave);
+    note_log_dirty = 1;
+    if(midi_note_active[channel] && midi_note[channel] == midi_note_value)
+        return;
+    if(midi_note_active[channel])
+        midi_write_event(0x80 | (channel & 0x0f),midi_note[channel],0);
+    midi_write_event(0x90 | (channel & 0x0f),midi_note_value,100);
+    midi_note[channel] = midi_note_value;
+    midi_note_active[channel] = 1;
     static const char* names[12] = {"A-","A#","B-","C-","C#","D-","D#","E-","F-","F#","G-","G#"};
     int octave;
     if(channel < 0 || channel >= 32)
@@ -257,6 +408,11 @@ void vgm_note_off(int channel)
         return;
     strcpy(note_log_notes[channel],"---");
     note_log_dirty = 1;
+    if(midi_note_active[channel])
+    {
+        midi_write_event(0x80 | (channel & 0x0f),midi_note[channel],0);
+        midi_note_active[channel] = 0;
+    }
 }
 
 // https://github.com/cppformat/cppformat/pull/130/files
@@ -336,6 +492,7 @@ void vgm_close()
         fclose(note_log);
         note_log = NULL;
     }
+    midi_close();
 
     free(vgmdata);
     free(filename);
