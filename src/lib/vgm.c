@@ -223,6 +223,7 @@ void add_delay(uint8_t** dest, int delay)
         vgm_note_log_flush();
         midi_add_delay(delay);
     }
+        vgm_note_log_flush();
     samplecnt += delay;
 
     int commandcount = floor(delay/65535);
@@ -388,6 +389,7 @@ void vgm_note_on(int channel, uint8_t note)
     if(channel < 0 || channel >= 32)
         return;
     midi_note_value = midi_note_from_log_note(note);
+    midi_note_value = note;
     octave = (note-3)/12;
     note %= 12;
     snprintf(note_log_notes[channel],sizeof(note_log_notes[channel]),"%s%d",Q_NoteNames[note],octave);
@@ -399,6 +401,15 @@ void vgm_note_on(int channel, uint8_t note)
     midi_write_event(0x90 | (channel & 0x0f),midi_note_value,100);
     midi_note[channel] = midi_note_value;
     midi_note_active[channel] = 1;
+    static const char* names[12] = {"A-","A#","B-","C-","C#","D-","D#","E-","F-","F#","G-","G#"};
+    int octave;
+    if(channel < 0 || channel >= 32)
+        return;
+    octave = (note-3)/12;
+    note %= 12;
+    snprintf(note_log_notes[channel],sizeof(note_log_notes[channel]),"%s%d",Q_NoteNames[note],octave);
+    snprintf(note_log_notes[channel],sizeof(note_log_notes[channel]),"%s%d",names[note],octave);
+    note_log_dirty = 1;
 }
 
 void vgm_note_from_c352(int channel, uint16_t freq)
