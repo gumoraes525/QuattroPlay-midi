@@ -227,12 +227,14 @@ void vgm_delay(uint32_t delay)
 
 void vgm_note_on(int channel, uint8_t note)
 {
+    static const char* names[12] = {"A-","A#","B-","C-","C#","D-","D#","E-","F-","F#","G-","G#"};
     int octave;
     if(channel < 0 || channel >= 32)
         return;
     octave = (note-3)/12;
     note %= 12;
     snprintf(note_log_notes[channel],sizeof(note_log_notes[channel]),"%s%d",Q_NoteNames[note],octave);
+    snprintf(note_log_notes[channel],sizeof(note_log_notes[channel]),"%s%d",names[note],octave);
     note_log_dirty = 1;
 }
 
