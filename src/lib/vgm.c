@@ -26,6 +26,8 @@
     int note_log_dirty;
     char note_log_notes[32][4];
 
+extern const char* Q_NoteNames[12];
+
 // Increments destination pointer
 void my_memcpy(uint8_t** dest, void* src, int size)
 {
@@ -231,6 +233,7 @@ void vgm_note_on(int channel, uint8_t note)
         return;
     octave = (note-3)/12;
     note %= 12;
+    snprintf(note_log_notes[channel],sizeof(note_log_notes[channel]),"%s%d",Q_NoteNames[note],octave);
     snprintf(note_log_notes[channel],sizeof(note_log_notes[channel]),"%s%d",names[note],octave);
     note_log_dirty = 1;
 }
