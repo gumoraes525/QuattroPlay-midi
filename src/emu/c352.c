@@ -94,7 +94,11 @@ void C352_write(C352 *c, uint16_t addr, uint16_t data)
     int i;
 
     if(addr < 0x100)
+    {
         *(uint16_t*)((void*)&c->v[addr/8]+C352RegMap[addr%8]) = data;
+        if((addr%8) == C352_FLAGS && !(data & C352_FLG_KEYON))
+            vgm_note_off(addr/8);
+    }
     else if(addr == 0x200)
         c->control1 = data;
     else if(addr == 0x201)
@@ -113,6 +117,7 @@ void C352_write(C352 *c, uint16_t addr, uint16_t data)
                 c->v[i].flags &= ~(C352_FLG_KEYON|C352_FLG_LOOPHIST);
 
                 c->v[i].latch_flags = c->v[i].flags;
+                vgm_note_from_c352(i,c->v[i].freq);
 
                 c->v[i].curr_vol[0] = c->v[i].curr_vol[1] = 0;
                 c->v[i].curr_vol[2] = c->v[i].curr_vol[3] = 0;
@@ -120,6 +125,7 @@ void C352_write(C352 *c, uint16_t addr, uint16_t data)
             if(c->v[i].flags & C352_FLG_KEYOFF)
             {
                 c->v[i].flags &= ~(C352_FLG_BUSY|C352_FLG_KEYOFF);
+                vgm_note_off(i);
                 c->v[i].counter = 0xffff;
             }
         }
