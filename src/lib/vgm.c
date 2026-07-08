@@ -14,6 +14,7 @@
 
 // has to be larger than ~20MB
 #define VGM_BUFFER 50000000
+#define VGM_MIDI_CHANNELS 8
 
     uint32_t buffer_size;
     uint32_t delayq;
@@ -93,6 +94,11 @@ static uint8_t midi_note_from_log_note(uint8_t note)
     return midi_note_value;
 }
 
+static uint8_t midi_channel_from_log_channel(int channel)
+{
+    return channel % VGM_MIDI_CHANNELS;
+}
+
 static void midi_write_event(uint8_t status, uint8_t data1, uint8_t data2)
 {
     if(!miditrack)
@@ -144,6 +150,7 @@ static void midi_note_off_all(void)
     {
         if(midi_note_active[i])
         {
+            midi_write_event(0x80 | midi_channel_from_log_channel(i),midi_note[i],0);
             midi_write_event(0x80 | (i & 0x0f),midi_note[i],0);
             midi_note_active[i] = 0;
         }
@@ -397,6 +404,10 @@ void vgm_note_on(int channel, uint8_t note)
     if(midi_note_active[channel] && midi_note[channel] == midi_note_value)
         return;
     if(midi_note_active[channel])
+        midi_write_event(0x80 | midi_channel_from_log_channel(channel),midi_note[channel],0);
+    midi_write_event(0x90 | midi_channel_from_log_channel(channel),midi_note_value,100);
+    midi_note[channel] = midi_note_value;
+    midi_note_active[channel] = 1;
         midi_write_event(0x80 | (channel & 0x0f),midi_note[channel],0);
     midi_write_event(0x90 | (channel & 0x0f),midi_note_value,100);
     midi_note[channel] = midi_note_value;
@@ -433,6 +444,7 @@ void vgm_note_off(int channel)
     note_log_dirty = 1;
     if(midi_note_active[channel])
     {
+        midi_write_event(0x80 | midi_channel_from_log_channel(channel),midi_note[channel],0);
         midi_write_event(0x80 | (channel & 0x0f),midi_note[channel],0);
         midi_note_active[channel] = 0;
     }
