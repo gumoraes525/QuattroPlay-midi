@@ -413,7 +413,6 @@ void vgm_note_on(int channel, uint8_t note)
     midi_note[channel] = midi_note_value;
     midi_note_active[channel] = 1;
     static const char* names[12] = {"A-","A#","B-","C-","C#","D-","D#","E-","F-","F#","G-","G#"};
-    int octave;
     if(channel < 0 || channel >= 32)
         return;
     octave = (note-3)/12;
